@@ -1,0 +1,144 @@
+# BGP optimizer prototype lab.
+#
+#   client -- EDGE (AS65000) --+-- ISP-A (AS65001) --+
+#               |              +-- ISP-B (AS65002) --+-- INET (AS65100) -- target
+#           optimizer (ExaBGP, iBGP AS65000)
+#
+# Interface map
+#   edge:  eth1 client | eth2 isp-a | eth3 isp-b | eth4 optimizer
+#   isp-a: eth1 edge   | eth2 inet
+#   isp-b: eth1 edge   | eth2 inet
+#   inet:  eth1 isp-a  | eth2 isp-b | eth3 target
+name: bgpopt
+
+mgmt:
+  network: bgpopt-mgmt
+  ipv4-subnet: 172.31.250.0/24
+
+topology:
+  nodes:
+    edge:
+      kind: linux
+      image: quay.io/frrouting/frr:10.5.5
+      binds:
+        - configs/edge/daemons:/etc/frr/daemons
+        - configs/edge/frr.conf:/etc/frr/frr.conf
+        - configs/edge/vtysh.conf:/etc/frr/vtysh.conf
+      sysctls:
+        net.ipv4.ip_forward: 1
+        net.ipv4.conf.all.rp_filter: 0
+        net.ipv4.conf.default.rp_filter: 0
+      exec:
+        # Probe pinning: traffic sourced from a probe address leaves via a
+        # fixed ISP regardless of the BGP best path.
+        - ip rule add from 10.99.1.0/24 lookup 101 priority 1001
+        - ip route replace default via 10.1.0.2 dev eth2 onlink table 101
+        - ip rule add from 10.99.2.0/24 lookup 102 priority 1002
+        - ip route replace default via 10.2.0.2 dev eth3 onlink table 102
+
+    isp-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.5.5
+      binds:
+        - configs/isp-a/daemons:/etc/frr/daemons
+        - configs/isp-a/frr.conf:/etc/frr/frr.conf
+        - configs/isp-a/vtysh.conf:/etc/frr/vtysh.conf
+      sysctls:
+        net.ipv4.ip_forward: 1
+
+    isp-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.5.5
+      binds:
+        - configs/isp-b/daemons:/etc/frr/daemons
+        - configs/isp-b/frr.conf:/etc/frr/frr.conf
+        - configs/isp-b/vtysh.conf:/etc/frr/vtysh.conf
+      sysctls:
+        net.ipv4.ip_forward: 1
+
+    inet:
+      kind: linux
+      image: quay.io/frrouting/frr:10.5.5
+      binds:
+        - configs/inet/daemons:/etc/frr/daemons
+        - configs/inet/frr.conf:/etc/frr/frr.conf
+        - configs/inet/vtysh.conf:/etc/frr/vtysh.conf
+      sysctls:
+        net.ipv4.ip_forward: 1
+
+    client:
+      kind: linux
+      image: bgpopt-host:0.1.0
+      # data-plane ground truth for Grafana (real path + RTT), :9100/metrics.txt
+      cmd: /usr/local/bin/path-exporter.sh
+      exec:
+        - ip addr add 203.0.113.10/24 dev eth1
+        # keep the mgmt default route; lab prefixes go via edge
+        - ip route add 198.51.100.0/24 via 203.0.113.1
+
+    target:
+      kind: linux
+      image: bgpopt-host:0.1.0
+      cmd: httpd -f -p 80 -h /www
+      exec:
+        - ip addr add 198.51.100.10/24 dev eth1
+        - ip route add 203.0.113.0/24 via 198.51.100.1
+        - ip route add 10.99.0.0/16 via 198.51.100.1
+        - iperf3 -s -D
+
+    optimizer:
+      kind: linux
+      image: bgpopt-optimizer:0.1.0
+      # After a fail-safe exit a Docker auto-restart would come back WITHOUT the
+      # clab veth to edge; keep it down instead and use `make optimizer-start`.
+      restart-policy: "no"
+      binds:
+        - configs/optimizer/config.yaml:/etc/optimizer/config.yaml:ro
+      env:
+        OPT_IFACE: eth1
+        OPT_LINK_ADDR: 10.9.0.2/30
+        OPT_GATEWAY: 10.9.0.1
+        OPT_PROBE_ADDRS: "10.99.1.1/32 10.99.2.1/32"
+        OPT_PROBE_NET: 10.99.0.0/16
+
+    # ---- observability (management network only, no data-plane links) ----
+    prometheus:
+      kind: linux
+      image: prom/prometheus:v3.15.1
+      binds:
+        - configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      cmd: >-
+        --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus
+        --storage.tsdb.retention.time=1d
+      ports:
+        - 9090:9090
+
+    grafana:
+      kind: linux
+      image: grafana/grafana:13.2.4
+      binds:
+        - configs/grafana/provisioning:/etc/grafana/provisioning:ro
+        - configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      env:
+        # open http://localhost:3000 and see the dashboard, no login needed
+        GF_AUTH_ANONYMOUS_ENABLED: "true"
+        GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+        GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/bgp-optimizer.json
+        GF_SECURITY_ADMIN_USER: admin
+        GF_SECURITY_ADMIN_PASSWORD: admin
+        GF_ANALYTICS_REPORTING_ENABLED: "false"
+        GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+        GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+        GF_NEWS_NEWS_FEED_ENABLED: "false"
+      ports:
+        - 3000:3000
+
+  links:
+    - endpoints: ["client:eth1", "edge:eth1"]
+    - endpoints: ["edge:eth2", "isp-a:eth1"]
+    - endpoints: ["edge:eth3", "isp-b:eth1"]
+    - endpoints: ["isp-a:eth2", "inet:eth1"]
+    - endpoints: ["isp-b:eth2", "inet:eth2"]
+    - endpoints: ["inet:eth3", "target:eth1"]
+    - endpoints: ["optimizer:eth1", "edge:eth4"]

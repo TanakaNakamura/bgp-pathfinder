@@ -1,0 +1,18 @@
+# Lab Prometheus: scrapes the optimizer and the client's data-plane exporter
+# over the containerlab management network (Docker DNS resolves container names).
+global:
+  scrape_interval: 2s
+  scrape_timeout: 1s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: optimizer
+    static_configs:
+      - targets: ["clab-bgpopt-optimizer:9101"]
+
+  - job_name: client
+    metrics_path: /metrics.txt
+    # busybox httpd serves .txt as text/plain without a version parameter
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ["clab-bgpopt-client:9100"]

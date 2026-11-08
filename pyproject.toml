@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bgp-optimizer"
+version = "0.1.0"
+description = "Prototype outbound BGP path optimizer (ExaBGP-driven)"
+requires-python = ">=3.12"
+dependencies = ["PyYAML==6.0.2", "prometheus-client==0.26.0"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "coverage==7.6.10"]
+
+[project.scripts]
+optimizer = "optimizer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["optimizer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+addopts = "-q"

@@ -1,0 +1,64 @@
+# Optimizer configuration for the containerlab lab.
+# Mounted into the optimizer container as /etc/optimizer/config.yaml.
+
+# true: only log "what I would do and why", never announce anything.
+# Can be flipped at runtime with `optimizer mode dry-run|live`.
+dry_run: false
+
+db_path: /var/lib/optimizer/optimizer.db
+
+log:
+  level: INFO
+  file: /var/log/optimizer/optimizer.jsonl
+
+providers:
+  - name: isp-a
+    probe_source: 10.99.1.1   # edge pins this source to ISP-A (ip rule ... lookup 101)
+    next_hop: 10.1.0.2
+  - name: isp-b
+    probe_source: 10.99.2.1   # edge pins this source to ISP-B (ip rule ... lookup 102)
+    next_hop: 10.2.0.2
+
+# Provider chosen by plain BGP policy on edge (local-pref 150 from ISP-A).
+# When it is the best one, the optimizer withdraws its override.
+base_provider: isp-a
+
+# MVP: static list instead of NetFlow/sFlow.
+prefixes:
+  - prefix: 198.51.100.0/24
+    targets: [198.51.100.10]
+
+probe:
+  interval_s: 2          # one round every 2 s for every (prefix, provider)
+  window_rounds: 10      # sliding window = last 10 rounds (~20 s)
+  icmp:
+    count: 5
+    interval_s: 0.2
+    timeout_s: 1
+  tcp:
+    enabled: true
+    port: 80
+    timeout_s: 1
+
+decision:
+  min_samples: 15            # fewer probes in the window -> do nothing
+  rtt_threshold_ms: 20       # alternative must be >= 20 ms better ...
+  loss_threshold_pct: 2      # ... or >= 2 % less loss
+  return_ratio: 0.5          # back to base when the advantage drops below 50 % of the threshold
+  confirm_rounds: 3          # hysteresis: N consecutive rounds
+  hold_down_s: 60            # keep a decision at least this long
+  max_changes_per_minute: 2  # global route change budget
+  bad_loss_pct: 30           # a provider is "bad" above this loss ...
+  bad_rtt_ms: 1000           # ... or above this RTT
+  loss_weight_ms: 25         # score = rtt + jitter_weight * jitter + loss_weight_ms * loss_pct
+  jitter_weight: 1.0
+
+# Prometheus endpoint, scraped by the lab Prometheus and shown in Grafana
+# (http://localhost:3000). Remove this section to disable it.
+metrics:
+  listen: 0.0.0.0
+  port: 9101
+
+bgp:
+  local_preference: 300
+  communities: [no-export, no-advertise]
